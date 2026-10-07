@@ -15,8 +15,9 @@ def norm_date(s):
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
     return s
 
-today = datetime.date.today()
-date_str = norm_date(os.environ.get("SNAPSHOT_DATE", "")) or today.isoformat()
+os.environ.setdefault("SNAPSHOT_DATE",
+                      datetime.date.today().isoformat())   # never stamp "today" implicitly
+date_str = norm_date(os.environ["SNAPSHOT_DATE"])
 ts = os.environ.get("SNAPSHOT_TS") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
