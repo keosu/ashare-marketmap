@@ -1,0 +1,11 @@
+# Shell scripts must stay LF or they break on the Linux CI runner.
+*.sh text eol=lf
+
+# Python: normalize, CI reads them as-is.
+*.py text eol=lf
+
+# PowerShell: CRLF is conventional and required by some Windows tooling.
+*.ps1 text eol=crlf
+
+# Snapshot payloads are large single-line JSON — no diff-friendly line breaks.
+data/*.json -diff
