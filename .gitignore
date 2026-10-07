@@ -1,0 +1,15 @@
+# python
+__pycache__/
+*.pyc
+
+# local scratch
+data.json
+shot*.png
+.cdp-*/
+
+# NOTE: index.html and data/ are intentionally committed — Pages serves them
+# straight from the repo, and each daily snapshot is a real historical record.
+
+# agent memory + local test harness
+.workbuddy/
+smoke.js

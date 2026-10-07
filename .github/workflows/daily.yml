@@ -1,0 +1,137 @@
+name: Daily A-share snapshot
+
+on:
+  schedule:
+    # 交易日收盘后跑：北京时间 17:20 = UTC 09:20
+    # 加一次凌晨补跑，覆盖节假日 / 上游延迟的情况
+    - cron: '20 9 * * 1-5'
+    - cron: '50 1 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制抓取（忽略交易日判断）'
+        required: false
+        default: 'false'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ashare-daily
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch full A-share universe
+        id: fetch
+        env:
+          FORCE: ${{ github.event.inputs.force || '0' }}
+        run: |
+          set -e
+          rc=0
+          python fetch_ashare.py || rc=$?
+          if [ "$rc" = "3" ]; then
+            echo "::notice::非交易日，跳过抓取"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" != "0" ]; then
+            echo "::error::抓取失败 (rc=$rc)"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit "$rc"
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Detect trade date and build
+        id: build
+        if: steps.fetch.outputs.skip != 'true'
+        run: |
+          set -e
+          # Ask the index for its own latest session date (authoritative), so a
+          # holiday or a stale upstream response can never be stamped as today.
+          TRADE_DATE=$(python - <<'PY'
+          import json, urllib.request, datetime
+          req = urllib.request.Request(
+              "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f124",
+              headers={"User-Agent": "Mozilla/5.0"})
+          d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
+          ep = (d.get("data") or {}).get("f124")
+          print(datetime.datetime.fromtimestamp(int(ep)).strftime("%Y-%m-%d") if ep else "")
+          PY
+          )
+          echo "trade date: $TRADE_DATE"
+          if [ -z "$TRADE_DATE" ]; then
+            TRADE_DATE=$(date -u +%F)
+            echo "probe failed, falling back to $TRADE_DATE"
+          fi
+          echo "TRADE_DATE=$TRADE_DATE" >> "$GITHUB_ENV"
+
+          # Idempotency: if this date is already committed, stop here.
+          if git ls-files --error-unmatch "data/$TRADE_DATE.json" >/dev/null 2>&1; then
+            echo "data/$TRADE_DATE.json already exists -> nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SNAPSHOT_DATE="$TRADE_DATE" EMBED=0 python build.py
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit snapshot
+        if: steps.build.outputs.changed == 'true'
+        env:
+          TRADE_DATE: ${{ env.TRADE_DATE }}
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A index.html data/
+          if git diff --staged --quiet; then
+            echo "no diff"
+            exit 0
+          fi
+          git commit -m "snapshot: A-share market cap map for $TRADE_DATE"
+          git push
+
+      - name: Summary
+        if: always()
+        env:
+          TRADE_DATE: ${{ env.TRADE_DATE }}
+        run: |
+          {
+            echo "### A股快照 ${TRADE_DATE:-未生成}"
+            echo ""
+            echo "- 抓取: ${{ steps.fetch.outcome }}"
+            echo "- 构建: ${{ steps.build.outcome }}"
+            echo "- 新提交: ${{ steps.build.outputs.changed || 'false' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: update
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          # ship only what the site actually needs
+          path: |
+            index.html
+            data/
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

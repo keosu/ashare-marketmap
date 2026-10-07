@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A股市值全景图 · Market Cap Universe</title>
+<style>
+  :root{
+    --bg:#0a0c10;
+    --bg2:#0e1117;
+    --panel:#12161e;
+    --panel2:#171c26;
+    --line:#232a36;
+    --txt:#e8edf5;
+    --dim:#8792a5;
+    --dim2:#5d6779;
+    --up:#ff4050;
+    --dn:#20e082;
+    --accent:#4da3ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 700px at 18% -10%, #16202e 0%, transparent 60%),
+      radial-gradient(900px 600px at 100% 110%, #1a1420 0%, transparent 60%),
+      var(--bg);
+    color:var(--txt);
+    font:13px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  #app{display:flex;flex-direction:column;height:100vh}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex;align-items:center;gap:26px;
+    padding:12px 20px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(20,26,36,.92),rgba(12,15,20,.75));
+    backdrop-filter:blur(8px);flex:0 0 auto;
+  }
+  .brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+  .brand h1{
+    font-size:16px;font-weight:650;letter-spacing:.06em;white-space:nowrap;
+    background:linear-gradient(90deg,#fff,#8fb6ff 70%,#4da3ff);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .brand .sub{font-size:10.5px;color:var(--dim2);letter-spacing:.18em;text-transform:uppercase;white-space:nowrap}
+
+  .stats{display:flex;gap:8px;flex:1;min-width:0;overflow:hidden}
+  .stat{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:5px 11px;min-width:74px;
+  }
+  .stat .k{font-size:9.5px;color:var(--dim2);letter-spacing:.1em;white-space:nowrap}
+  .stat .v{font-size:14px;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .stat .v.up{color:var(--up)} .stat .v.dn{color:var(--dn)}
+
+  .tools{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{
+    background:none;border:0;color:var(--dim);padding:6px 11px;cursor:pointer;
+    font:600 11.5px/1 system-ui,"Microsoft YaHei",sans-serif;letter-spacing:.04em;
+  }
+  .seg button.on{background:#243044;color:#fff}
+  .seg button:hover{color:#fff}
+  .src{font-size:10px;color:var(--dim2);text-align:right;line-height:1.35;white-space:nowrap}
+
+  /* ---------- date picker ---------- */
+  .datesel{
+    display:flex;align-items:stretch;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  }
+  .datesel button{
+    background:none;border:0;color:var(--dim);cursor:pointer;padding:0 9px;
+    font:600 15px/1 system-ui,sans-serif;
+  }
+  .datesel button:hover:not(:disabled){background:#243044;color:#fff}
+  .datesel button:disabled{opacity:.28;cursor:default}
+  .datesel select{
+    background:none;border:0;border-left:1px solid var(--line);border-right:1px solid var(--line);
+    color:var(--txt);padding:6px 8px;cursor:pointer;outline:none;
+    font:600 12px/1.2 system-ui,"Microsoft YaHei",sans-serif;
+    font-variant-numeric:tabular-nums;
+  }
+  .datesel select option{background:#12161e;color:var(--txt)}
+  .datesel.off{display:none}
+
+  /* ---------- body ---------- */
+  main{display:flex;flex:1;min-height:0}
+
+  aside{
+    width:238px;flex:0 0 238px;border-right:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(18,22,30,.7),rgba(10,12,16,.7));
+    display:flex;flex-direction:column;min-height:0;
+  }
+  .searchbox{padding:10px;border-bottom:1px solid var(--line);position:relative;flex:0 0 auto}
+  .searchbox input{
+    width:100%;background:#0d1117;border:1px solid var(--line);border-radius:7px;
+    color:var(--txt);padding:7px 10px 7px 28px;font:12px/1.2 system-ui,"Microsoft YaHei",sans-serif;outline:none;
+  }
+  .searchbox input:focus{border-color:#2e4a72;box-shadow:0 0 0 2px rgba(77,163,255,.12)}
+  .searchbox svg{position:absolute;left:19px;top:50%;transform:translateY(-50%);opacity:.45}
+  .side-h{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:8px 12px 6px;font-size:9.5px;letter-spacing:.16em;color:var(--dim2);
+    text-transform:uppercase;flex:0 0 auto;
+  }
+  #indList{flex:1;overflow-y:auto;padding:0 6px 10px}
+  #indList::-webkit-scrollbar{width:7px}
+  #indList::-webkit-scrollbar-thumb{background:#242c3a;border-radius:4px}
+  .ind{
+    display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:6px;cursor:pointer;
+    border:1px solid transparent;
+  }
+  .ind:hover{background:#1a2130}
+  .ind.on{background:#1e2839;border-color:#2c3c58}
+  .ind .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .ind .ct{font-size:10px;color:var(--dim2);font-variant-numeric:tabular-nums}
+  .ind .ch{font-size:11px;font-weight:650;font-variant-numeric:tabular-nums;width:46px;text-align:right}
+
+  /* ---------- canvas ---------- */
+  #stage{flex:1;position:relative;min-width:0;overflow:hidden}
+  canvas{display:block;width:100%;height:100%;cursor:crosshair}
+
+  .crumb{
+    position:absolute;left:14px;top:12px;display:flex;align-items:center;gap:8px;z-index:5;
+  }
+  .crumb .pill{
+    background:rgba(20,26,36,.9);border:1px solid var(--line);border-radius:20px;
+    padding:5px 13px;font-size:12px;display:flex;align-items:center;gap:8px;cursor:pointer;
+    backdrop-filter:blur(6px);
+  }
+  .crumb .pill:hover{border-color:#33455f}
+  .crumb .pill b{font-weight:650}
+  .crumb .pill .n{color:var(--dim2);font-size:11px}
+
+  .legend{
+    position:absolute;right:14px;bottom:12px;z-index:5;
+    background:rgba(16,20,28,.9);border:1px solid var(--line);border-radius:10px;
+    padding:9px 12px 8px;backdrop-filter:blur(8px);min-width:206px;
+  }
+  .legend .t{font-size:9.5px;letter-spacing:.14em;color:var(--dim2);text-transform:uppercase;margin-bottom:6px}
+  .ramp{display:flex;height:9px;border-radius:5px;overflow:hidden}
+  .ramp i{flex:1}
+  .rampax{display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim2);margin-top:4px;font-variant-numeric:tabular-nums}
+  .lghint{margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-size:10px;color:var(--dim2);line-height:1.6}
+  .lghint kbd{background:#1d2430;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:var(--dim);font:10px monospace}
+
+  .tip{
+    position:absolute;pointer-events:none;z-index:20;opacity:0;transition:opacity .09s;
+    background:rgba(13,17,23,.97);border:1px solid #2b3546;border-radius:9px;
+    padding:9px 11px;min-width:186px;box-shadow:0 12px 34px rgba(0,0,0,.6);
+  }
+  .tip .n{font-size:14px;font-weight:650;display:flex;align-items:center;gap:7px}
+  .tip .c{font-size:10.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
+  .tip .row{display:flex;justify-content:space-between;gap:16px;font-size:11.5px;margin-top:5px;color:var(--dim)}
+  .tip .row b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
+  .tip .ind{margin-top:6px;padding-top:6px;border-top:1px solid var(--line);font-size:10.5px;color:var(--dim2)}
+
+  .foot{
+    position:absolute;left:14px;bottom:12px;z-index:5;font-size:10px;color:var(--dim2);
+    background:rgba(16,20,28,.8);border:1px solid var(--line);border-radius:7px;padding:5px 10px;
+    backdrop-filter:blur(6px);font-variant-numeric:tabular-nums;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">
+      <h1>A股市值全景图</h1>
+      <span class="sub">Market Cap Universe</span>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="tools">
+      <div class="datesel" id="dateSel">
+        <button id="dPrev" title="上一个交易日">‹</button>
+        <select id="dPick" title="选择日期"></select>
+        <button id="dNext" title="下一个交易日">›</button>
+      </div>
+      <div class="seg" id="capSeg">
+        <button data-v="mcap" class="on">总市值</button>
+        <button data-v="float">流通市值</button>
+      </div>
+      <div class="seg" id="sortSeg">
+        <button data-v="cap" class="on">按市值</button>
+        <button data-v="chg">按涨跌</button>
+      </div>
+      <div class="src" id="src"></div>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="searchbox">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" stroke-width="2.4">
+          <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>
+        </svg>
+        <input id="q" placeholder="搜索股票 / 代码" spellcheck="false">
+      </div>
+      <div class="side-h"><span>行业分区</span><span id="indCnt"></span></div>
+      <div id="indList"></div>
+    </aside>
+
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div class="crumb" id="crumb"></div>
+      <div class="foot" id="foot"></div>
+      <div class="legend">
+        <div class="t">当日涨跌</div>
+        <div class="ramp" id="ramp"></div>
+        <div class="rampax"><span>跌停</span><span>0</span><span>涨停</span></div>
+        <div class="lghint">
+          <kbd>点击</kbd> 进入行业 · <kbd>Esc</kbd> 返回<br>
+          <kbd>/</kbd> 搜索
+        </div>
+      </div>
+      <div class="tip" id="tip"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* ===================== DATA =====================
+   Embedded snapshot acts as the offline fallback. When the page is served over
+   HTTP we additionally fetch data/manifest.json and switch to whichever date
+   the user picks. */
+const EMBED = /*__DATA__*/[];      // [[code,name,price,chg,mcap,floatCap,industry,market], ...]
+const EMBED_TS = '__TS__';
+const MKT = {1:'沪',0:'深/北'};
+
+/* ===================== helpers ===================== */
+const NF  = new Intl.NumberFormat('en-US');
+const YI  = v => (v/1e8);
+function fmtCap(v){
+  const y = YI(v);
+  if (y >= 10000) return (y/10000).toFixed(2) + ' 万亿';
+  if (y >= 1)     return y.toFixed(y>=100?0:1) + ' 亿';
+  return NF.format(Math.round(v));
+}
+function fmtPct(d){
+  if (d===null||d===undefined||isNaN(d)) return '—';
+  return (d>0?'+':'') + d.toFixed(2) + '%';
+}
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+
+/* colour ramp: depth = magnitude of daily move.  red = up, green = down (CN convention) */
+const C_FLAT=[38,41,49], C_UP1=[96,33,42], C_UP2=[255,64,82];
+const C_DN1=[22,74,53], C_DN2=[32,224,130];
+function mix(a,b,t){return [Math.round(lerp(a[0],b[0],t)),Math.round(lerp(a[1],b[1],t)),Math.round(lerp(a[2],b[2],t))];}
+function chgColor(d){
+  if(d===null||d===undefined||isNaN(d)) return 'rgb(46,50,58)';
+  const t = Math.pow(clamp(Math.abs(d)/9.5,0,1), 0.5);
+  if (d > 0){
+    const c = t < 0.22 ? mix(C_FLAT,C_UP1,t/0.22) : mix(C_UP1,C_UP2,(t-0.22)/0.78);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  if (d < 0){
+    const c = t < 0.22 ? mix(C_FLAT,C_DN1,t/0.22) : mix(C_DN1,C_DN2,(t-0.22)/0.78);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  return 'rgb(46,50,58)';
+}
+function lum(rgbStr){
+  const m = rgbStr.match(/\d+/g); if(!m) return .5;
+  return (0.2126*m[0] + 0.7152*m[1] + 0.0722*m[2]) / 255;
+}
+
+/* ===================== squarified treemap =====================
+   Bruls/Huizing/van Wijk squarified treemap.
+   Area is conserved exactly (items are scaled so sum(area) == w*h);
+   the worst aspect ratio of a candidate row decides when to close it. */
+function squarify(nodes, x, y, w, h){
+  const out = [];
+  const all0 = nodes.filter(n => n.v > 0);
+  // Degenerate box: still emit every item as a sliver so no stock is lost.
+  if (w <= 0 || h <= 0){
+    const n = Math.max(1, all0.length);
+    for (let i = 0; i < all0.length; i++){
+      out.push({ n: all0[i], x: x + (w / n) * i, y, w: Math.max(0.1, w / n), h: Math.max(0.1, h) });
+    }
+    return out;
+  }
+  let items = all0;
+  if (!items.length) return out;
+  const total = items.reduce((s, n) => s + n.v, 0);
+  if (!(total > 0)) return out;
+  const scale = (w * h) / total;
+  items = items.map(n => ({ n, a: n.v * scale }));
+
+  let rx = x, ry = y, rw = w, rh = h;
+  let idx = 0, row = [], rowA = 0;
+
+  // row spans the LONGER side, so thickness = totalRowArea / rowLength
+  const rowLen  = () => Math.max(rw, rh);
+  const worst   = (n, A, L) => { if (A <= 0) return Infinity; const q = (L * L) / (n * A); return Math.max(q, 1 / q); };
+
+  const flush = () => {
+    if (!row.length) return;
+    const L = rowLen();
+    const T = rowA / L;                 // band thickness
+    const horiz = rw >= rh;             // band runs along x
+    let off = 0;
+    for (const it of row){
+      const len = it.a / T;
+      if (horiz) out.push({ n: it.n, x: rx + off, y: ry,     w: len, h: T });
+      else       out.push({ n: it.n, x: rx,     y: ry + off, w: T,  h: len });
+      off += len;
+    }
+    // the band spans the full length it runs along, so it eats the OTHER axis
+    if (horiz){ rh -= T; ry += T; } else { rw -= T; rx += T; }
+    row = []; rowA = 0;
+  };
+
+  while (idx < items.length){
+    const L = rowLen();
+    const next = items[idx];
+    if (row.length === 0 || worst(row.length + 1, rowA + next.a, L) <= worst(row.length, rowA, L)){
+      row.push(next); rowA += next.a; idx++;
+    } else {
+      flush();
+    }
+    if (rw <= 0.02 || rh <= 0.02) break;   // float guard
+  }
+  flush();
+  // The float guard can trip on sub-pixel remainders. Keep every item
+  // represented so the cell count always matches the dataset, even when the
+  // resulting box is too small to see. Lay the leftovers out as an even row.
+  if (idx < items.length){
+    const rest = items.slice(idx);
+    const n = rest.length;
+    const cw = Math.max(0.1, rw / n);
+    for (let i = 0; i < n; i++){
+      out.push({ n: rest[i].n, x: rx + i * cw, y: ry, w: cw, h: Math.max(0.1, rh) });
+    }
+  }
+  return out;
+}
+
+/* ===================== build model ===================== */
+const state = {
+  capKey : 'v',     // 'v' total mcap | 'f' float cap
+  sortBy : 'cap',   // 'cap' | 'chg'
+  focus  : null,    // industry name
+  hover  : null,
+  hit    : [],
+  dirty  : true
+};
+
+/* ===================== dataset (rebuildable) ===================== */
+let groups  = new Map();
+let all     = [];
+let groupList = [];
+let totals  = {n:0, v:0, f:0, up:0, dn:0, fl:0};
+let med = 0, mean = 0;
+let curDate = null, curStamp = '';
+
+/* rows: [[code,name,price,chg,mcap,floatCap,industry,market], ...] */
+function loadDataset(rows, date, stamp){
+  groups = new Map();
+  all = rows.map(r=>{
+    const o = {c:r[0], n:r[1], p:r[2], d:r[3], v:r[4], f:r[5], ind:r[6], m:r[7], fl:r[5]};
+    let g = groups.get(o.ind);
+    if(!g){ g = {name:o.ind, items:[], tv:0, tf:0, n:0}; groups.set(o.ind, g); }
+    g.items.push(o); g.tv += o.v; g.tf += o.f; g.n++;
+    return o;
+  });
+  all.forEach(o=>{ o.wsum = (o.d===null || o.d===undefined || isNaN(o.d)) ? 0 : o.d; });
+
+  groupList = [...groups.values()].sort((a,b)=> b.tv - a.tv);
+
+  totals = {
+    n  : all.length,
+    v  : all.reduce((s,x)=>s+x.v,0),
+    f  : all.reduce((s,x)=>s+x.f,0),
+    up : all.filter(x=>x.d>0).length,
+    dn : all.filter(x=>x.d<0).length,
+    fl : all.filter(x=>x.d===0||x.d===null||x.d===undefined||isNaN(x.d)).length
+  };
+  const ds = all.map(x=>x.d).filter(x=>x!==null&&!isNaN(x)).sort((a,b)=>a-b);
+  med   = ds.length ? ds[ds.length>>1] : 0;
+  mean  = ds.length ? ds.reduce((a,b)=>a+b,0)/ds.length : 0;
+  curDate = date || null;
+  curStamp = stamp || '';
+}
+
+/* date label helpers */
+function todayStr(d){
+  const p = n => (n<10?'0':'')+n;
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+}
+function parseDate(s){
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s||'');
+  return m ? new Date(+m[1], +m[2]-1, +m[3]) : null;
+}
+const WD = ['周日','周一','周二','周三','周四','周五','周六'];
+function dateLabel(s){
+  const d = parseDate(s);
+  if(!d) return s || '—';
+  return s + ' ' + WD[d.getDay()];
+}
+
+/* ===================== header ===================== */
+function renderStats(){
+  const els = [
+    ['股票数', NF.format(totals.n), ''],
+    ['总市值', fmtCap(totals.v), ''],
+    ['流通市值', fmtCap(totals.f), ''],
+    ['上涨', NF.format(totals.up), 'up'],
+    ['下跌', NF.format(totals.dn), 'dn'],
+    ['平盘', NF.format(totals.fl), ''],
+    ['中位涨跌', fmtPct(med), med>0?'up':med<0?'dn':''],
+    ['平均涨跌', fmtPct(mean), mean>0?'up':mean<0?'dn':''],
+    ['行业数', NF.format(groupList.length), '']
+  ];
+  document.getElementById('stats').innerHTML =
+    els.map(e=>`<div class="stat"><div class="k">${e[0]}</div><div class="v ${e[2]}">${e[1]}</div></div>`).join('');
+}
+function renderSrc(){
+  const el = document.getElementById('src');
+  el.innerHTML = `数据来源：东方财富 · 沪深京全市场<br>快照：${curDate ? dateLabel(curDate) : (curStamp||'—')}`;
+}
+
+/* ===================== date switching ===================== */
+let DATES = [];          // [{date, count, up, dn, file}] newest first
+let loading = false;
+
+async function loadDate(date, push){
+  if (loading || !date) return;
+  const meta = DATES.find(d=>d.date===date);
+  if (!meta) return;
+  loading = true;
+  setBusy(true);
+  try{
+    const res  = await fetch('data/' + date + '.json', {cache:'no-cache'});
+    if (!res.ok) throw new Error(res.status);
+    const json = await res.json();
+    const rows = json.rows || json.data || [];
+    loadDataset(rows, date, json.ts || '');
+    state.focus = null;
+    state.hover = null;
+    state.pulse = null;
+    LAYOUT = {groups:[], cells:[]};
+    renderStats(); renderSide(); renderCrumb(); renderSrc();
+    state.dirty = true;
+    requestDraw();
+    const u = new URL(location.href);
+    u.searchParams.set('d', date);
+    history.replaceState(null, '', u);
+  }catch(err){
+    console.error('load date failed', err);
+    alert('加载 ' + date + ' 数据失败：' + err.message);
+  }finally{
+    loading = false;
+    setBusy(false);
+  }
+}
+function setBusy(on){
+  document.getElementById('dPick').style.opacity = on ? .5 : 1;
+}
+
+function renderDatePicker(){
+  const sel = document.getElementById('dateSel');
+  if (DATES.length <= 1){ sel.classList.add('off'); return; }
+  sel.classList.remove('off');
+  const pick = document.getElementById('dPick');
+  pick.innerHTML = DATES.map(d=>
+    `<option value="${d.date}">${dateLabel(d.date)} · ${d.count}只${d.chg>0?' ↑':d.chg<0?' ↓':''}</option>`
+  ).join('');
+  if (curDate) pick.value = curDate;
+
+  const i = DATES.findIndex(d=>d.date===curDate);
+  document.getElementById('dPrev').disabled = (i < 0 || i >= DATES.length-1);
+  document.getElementById('dNext').disabled = (i <= 0);
+
+  pick.onchange = ()=> loadDate(pick.value);
+  document.getElementById('dPrev').onclick = ()=>{ if(i < DATES.length-1) loadDate(DATES[i+1].date); };
+  document.getElementById('dNext').onclick = ()=>{ if(i > 0)             loadDate(DATES[i-1].date); };
+}
+function renderRamp(){
+  const stops = [];
+  for(let i=0;i<24;i++){
+    const d = -9.5 + (i/23)*19;
+    stops.push(`<i style="background:${chgColor(d)}"></i>`);
+  }
+  document.getElementById('ramp').innerHTML = stops.join('');
+}
+
+/* ===================== sidebar ===================== */
+function renderSide(){
+  const box = document.getElementById('indList');
+  document.getElementById('indCnt').textContent = groupList.length + ' 个';
+  const key = state.capKey;
+  const rows = [`<div class="ind ${state.focus?'':'on'}" data-g="__ALL__">
+      <span class="nm">全部 A 股</span><span class="ct">${totals.n}</span>
+      <span class="ch" style="color:${chgColor(mean)}">${fmtPct(mean)}</span></div>`];
+  for (const g of groupList){
+    const wsum = g.items.reduce((s,x)=>s+x.wsum,0);
+    const avg = g.n ? wsum/g.n : 0;
+    const cap = key==='v' ? g.tv : g.tf;
+    rows.push(`<div class="ind ${state.focus===g.name?'on':''}" data-g="${g.name}" title="${g.name} · ${g.n}只 · ${fmtCap(cap)}">
+      <span class="nm">${g.name}</span>
+      <span class="ct">${g.n}只 ${fmtCap(cap)}</span>
+      <span class="ch" style="color:${chgColor(avg)}">${fmtPct(avg)}</span></div>`);
+  }
+  box.innerHTML = rows.join('');
+  box.querySelectorAll('.ind').forEach(el=>{
+    el.onclick = ()=> setFocus(el.dataset.g==='__ALL__' ? null : el.dataset.g);
+  });
+}
+
+/* ===================== layout ===================== */
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const stage = document.getElementById('stage');
+let W=0, H=0, DPR=1;
+
+function resize(){
+  const r = stage.getBoundingClientRect();
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = Math.max(320, r.width); H = Math.max(240, r.height);
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  state.dirty = true;
+}
+window.addEventListener('resize', ()=>{ resize(); requestDraw(); });
+
+function valueOf(o){ return state.capKey==='v' ? o.v : o.fl; }
+
+function buildLayout(){
+  const pad = 8, top = 4;
+  const bx = pad, by = top, bw = W - pad*2, bh = H - pad*2;
+  const blocks = [];
+
+  if (state.focus){
+    const g = groups.get(state.focus);
+    if (!g) return {groups:[], cells:[]};
+    const items = sortItems(g.items).filter(o=>valueOf(o)>0);
+    const laid = squarify(items.map(o=>({v:valueOf(o), o})), bx, by, bw, bh);
+    const cells = laid.map(l=>({o:l.n.o, x:l.x, y:l.y, w:l.w, h:l.h}));
+    blocks.push({name:g.name, x:bx, y:by, w:bw, h:bh, cells, g});
+    return {groups:blocks, cells};
+  }
+
+  const gs = groupList
+    .map(g=>({g, v: g.tv, tf: g.tf}))
+    .map(o=>({...o, v: state.capKey==='v' ? o.g.tv : o.g.tf}))
+    .filter(o=>o.v>0)
+    .sort((a,b)=> b.v-a.v);
+
+  const gl = squarify(gs, bx, by, bw, bh);
+  const cells = [];
+  for (const l of gl){
+    const g = l.n.g;
+    const gp = 1.2;
+    const gx = l.x+gp, gy = l.y+gp, gw = l.w-gp*2, gh = l.h-gp*2;
+    const headH = (gw>56 && gh>34) ? 17 : 0;
+    const items = sortItems(g.items).filter(o=>valueOf(o)>0);
+    const laid = squarify(items.map(o=>({v:valueOf(o), o})), gx, gy+headH, gw, gh-headH);
+    const cc = laid.map(t=>({o:t.n.o, x:t.x, y:t.y, w:t.w, h:t.h}));
+    cells.push(...cc);
+    blocks.push({name:g.name, x:gx, y:gy, w:gw, h:gh, headH, cells:cc, g});
+  }
+  return {groups:blocks, cells};
+}
+
+function sortItems(items){
+  const arr = items.slice();
+  if (state.sortBy==='chg') arr.sort((a,b)=> (b.d??-999) - (a.d??-999));
+  else arr.sort((a,b)=> valueOf(b) - valueOf(a));
+  return arr;
+}
+
+/* ===================== draw ===================== */
+let LAYOUT = {groups:[], cells:[]};
+let prevCanvas = null, fadeT = 1;
+
+function requestDraw(){ if(!rafId) rafId = requestAnimationFrame(frame); }
+let rafId = 0;
+function frame(){
+  rafId = 0;
+  if (state.dirty){ LAYOUT = buildLayout(); state.dirty = false; }
+  if (fadeT < 1){
+    fadeT = Math.min(1, fadeT + 0.09);
+    state.dirty = true;
+  }
+  paint();
+  if (fadeT < 1) requestDraw();
+}
+
+function paint(){
+  ctx.clearRect(0,0,W,H);
+
+  if (prevCanvas && fadeT < 1){
+    ctx.save(); ctx.globalAlpha = 1 - fadeT;
+    ctx.drawImage(prevCanvas, 0, 0, prevCanvas.width, prevCanvas.height, 0, 0, W, H);
+    ctx.restore();
+    if (fadeT < 0.999) ctx.globalAlpha = fadeT;
+  }
+
+  const hit = [];
+  const GAP = 1;
+
+  // group frames + headers
+  for (const b of LAYOUT.groups){
+    if (b.headH){
+      const avg = b.g.items.reduce((s,x)=>s+x.wsum,0)/b.g.n;
+      const wsum = b.g.items.reduce((s,x)=>s+x.wsum,0);
+      const wv = wsum/b.g.n;
+      ctx.fillStyle = 'rgba(8,10,14,0.72)';
+      ctx.fillRect(b.x, b.y, b.w, b.headH);
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillRect(b.x, b.y+b.headH-1, b.w, 1);
+
+      const cap = state.capKey==='v' ? b.g.tv : b.g.tf;
+      const fsz = clamp(Math.min(12, b.w/ (b.name.length*0.95) + 2.5), 9, 12.5);
+      ctx.font = `650 ${fsz}px system-ui,"Microsoft YaHei",sans-serif`;
+      ctx.textBaseline = 'middle';
+      let tx = b.x + 5;
+      ctx.fillStyle = 'rgba(233,240,250,0.94)';
+      const nm = fitText(ctx, b.name, b.w*0.58);
+      ctx.fillText(nm, tx, b.y + b.headH/2 + .5);
+      tx += ctx.measureText(nm).width + 7;
+
+      ctx.font = `600 ${Math.max(8.5, fsz-1.5)}px system-ui,"Microsoft YaHei",sans-serif`;
+      ctx.fillStyle = 'rgba(140,152,170,0.9)';
+      const meta = `${fmtCap(cap)} · ${b.g.n}只`;
+      if (tx + ctx.measureText(meta).width < b.x + b.w - 34){
+        ctx.fillText(meta, tx, b.y + b.headH/2 + .5);
+        tx += ctx.measureText(meta).width + 7;
+      }
+      ctx.fillStyle = chgColor(wv);
+      const pc = fmtPct(wv);
+      if (tx + ctx.measureText(pc).width <= b.x + b.w - 4){
+        ctx.fillText(pc, tx, b.y + b.headH/2 + .5);
+      }
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(b.x+.5, b.y+.5, b.w-1, b.h-1);
+  }
+
+  // cells
+  const hov = state.hover;
+  for (const c of LAYOUT.cells){
+    if (c.w < 0.7 || c.h < 0.7) continue;
+    const col = chgColor(c.o.d);
+    ctx.fillStyle = col;
+    ctx.fillRect(c.x, c.y, Math.max(0.6, c.w-GAP), Math.max(0.6, c.h-GAP));
+    hit.push({x:c.x, y:c.y, w:c.w-GAP, h:c.h-GAP, o:c.o});
+  }
+
+  // labels
+  for (const c of LAYOUT.cells){
+    if (c.w < 26 || c.h < 15) continue;
+    const col = chgColor(c.o.d);
+    const L = lum(col);
+    const fg = L > 0.56 ? 'rgba(10,12,16,0.94)' : 'rgba(255,255,255,0.95)';
+    const pad2 = 3;
+    const availW = c.w - pad2*2, availH = c.h - pad2*2;
+
+    const isHov = hov && hov.c === c.o.c;
+    let fs = clamp(Math.floor(Math.min(availH*0.42, availW/(c.o.n.length*0.62))), 8, 15);
+    if (isHov) fs = clamp(fs+1, 8, 17);
+    ctx.font = `${isHov?700:600} ${fs}px system-ui,"Microsoft YaHei",sans-serif`;
+    ctx.textBaseline = 'top';
+
+    const name = fitText(ctx, c.o.n, availW);
+    const showPct = availH >= fs*2.25;
+    const pct = fmtPct(c.o.d);
+
+    ctx.shadowColor = L>0.56 ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.65)';
+    ctx.shadowBlur = 3;
+    ctx.fillStyle = fg;
+    let ty = c.y + pad2;
+    ctx.fillText(name, c.x + pad2, ty);
+    if (showPct){
+      const pfs = Math.max(8, fs*0.82);
+      ctx.font = `600 ${pfs}px system-ui,"Microsoft YaHei",sans-serif`;
+      ctx.fillText(pct, c.x + pad2, ty + fs*1.08);
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  // highlight
+  if (hov){
+    const c = LAYOUT.cells.find(z=>z.o.c===hov.c);
+    if (c){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 1.6;
+      ctx.shadowColor = 'rgba(255,255,255,0.5)'; ctx.shadowBlur = 9;
+      ctx.strokeRect(c.x-0.8, c.y-0.8, c.w+1.6, c.h+1.6);
+      ctx.restore();
+    }
+  }
+  if (state.pulse && state.pulse.c){
+    const c = LAYOUT.cells.find(z=>z.o.c===state.pulse.c);
+    if (c){
+      const t = (performance.now()%1400)/1400;
+      ctx.save();
+      ctx.strokeStyle = `rgba(77,163,255,${1-t})`;
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(c.x-2-t*7, c.y-2-t*7, c.w+4+t*14, c.h+4+t*14);
+      ctx.restore();
+      requestDraw();
+    }
+  }
+  state.hit = hit;
+  ctx.globalAlpha = 1;
+}
+
+function fitText(ctx2, text, maxW){
+  if (ctx2.measureText(text).width <= maxW) return text;
+  let s = text;
+  while (s.length > 1 && ctx2.measureText(s+'…').width > maxW) s = s.slice(0,-1);
+  return s + '…';
+}
+
+/* ===================== interaction ===================== */
+const tip = document.getElementById('tip');
+function hitTest(mx,my){
+  const hs = state.hit;
+  // hit[] is pushed in draw order = descending by size, so scan from the front:
+  // big blocks win over the small ones drawn on top of them.
+  for (let i=0;i<hs.length;i++){
+    const h = hs[i];
+    if (mx>=h.x && mx<=h.x+h.w && my>=h.y && my<=h.y+h.h) return h.o;
+  }
+  return null;
+}
+cv.addEventListener('mousemove', e=>{
+  const r = cv.getBoundingClientRect();
+  const mx = e.clientX-r.left, my = e.clientY-r.top;
+  const o = hitTest(mx,my);
+  if ((o&&o.c) !== (state.hover&&state.hover.c)){ state.hover = o; state.dirty = true; requestDraw(); }
+  else if (o) requestDraw();
+  if (o){
+    const cap = state.capKey==='v' ? o.v : o.fl;
+    const capL = state.capKey==='v' ? '总市值' : '流通市值';
+    const tot = state.capKey==='v' ? totals.v : totals.f;
+    tip.innerHTML = `
+      <div class="n"><span style="color:${chgColor(o.d)}">●</span>${o.n}</div>
+      <div class="c">${o.c} · ${MKT[o.m]||''} · ${o.ind}</div>
+      <div class="row"><span>最新价</span><b>${o.p===null?'—':o.p.toFixed(2)}</b></div>
+      <div class="row"><span>涨跌幅</span><b style="color:${chgColor(o.d)}">${fmtPct(o.d)}</b></div>
+      <div class="row"><span>${capL}</span><b>${fmtCap(cap)}</b></div>
+      <div class="row"><span>全市场占比</span><b>${(cap/tot*100).toFixed(3)}%</b></div>
+      <div class="row"><span>流通市值</span><b>${fmtCap(o.fl)}</b></div>
+      <div class="ind">所属行业：${o.ind}（点击方块进入该行业）</div>`;
+    tip.style.opacity = 1;
+    const tw = 210, th = tip.offsetHeight || 170;
+    let px = mx + 16, py = my + 14;
+    if (px + tw > W) px = mx - tw - 14;
+    if (py + th > H) py = my - th - 12;
+    tip.style.left = Math.max(6,px)+'px';
+    tip.style.top  = Math.max(6,py)+'px';
+  } else {
+    tip.style.opacity = 0;
+  }
+});
+cv.addEventListener('mouseleave', ()=>{ state.hover=null; state.dirty=true; tip.style.opacity=0; requestDraw(); });
+cv.addEventListener('click', e=>{
+  const r = cv.getBoundingClientRect();
+  const o = hitTest(e.clientX-r.left, e.clientY-r.top);
+  if (o) setFocus(o.ind);
+});
+window.addEventListener('keydown', e=>{
+  if (e.key==='Escape'){ setFocus(null); document.getElementById('q').blur(); }
+  if (e.key==='/' && document.activeElement.id!=='q'){ e.preventDefault(); document.getElementById('q').focus(); }
+});
+
+function setFocus(ind){
+  if (state.focus === ind) return;
+  state.focus = ind;
+  // snapshot for crossfade
+  prevCanvas = document.createElement('canvas');
+  prevCanvas.width = cv.width; prevCanvas.height = cv.height;
+  prevCanvas.getContext('2d').drawImage(cv,0,0);
+  fadeT = 0;
+  state.dirty = true;
+  renderSide(); renderCrumb();
+  requestDraw();
+}
+
+/* ===================== breadcrumb ===================== */
+function renderCrumb(){
+  const box = document.getElementById('crumb');
+  if (!state.focus){
+    box.innerHTML = '';                       // no label in the all-market view
+  } else {
+    const g = groups.get(state.focus);
+    const cap = state.capKey==='v' ? g.tv : g.tf;
+    box.innerHTML = `<div class="pill" id="backAll"><b>← 全部 A 股</b></div>
+      <div class="pill" style="cursor:default"><b>${state.focus}</b><span class="n">${g.n} 只 · ${fmtCap(cap)}</span></div>`;
+    document.getElementById('backAll').onclick = ()=> setFocus(null);
+  }
+  const f = document.getElementById('foot');
+  f.textContent = state.focus
+    ? `当前视图：${state.focus} · 按${state.sortBy==='cap'?'总市值':'涨跌幅'}排列`
+    : `全市场 ${NF.format(totals.n)} 只 · ${groupList.length} 个行业 · 面积=市值 · 颜色=当日涨跌`;
+}
+
+/* ===================== search ===================== */
+const q = document.getElementById('q');
+let tmr = 0;
+q.addEventListener('input', ()=>{
+  clearTimeout(tmr);
+  tmr = setTimeout(()=>{
+    const v = q.value.trim().toLowerCase();
+    if (!v){ setFocus(null); state.pulse=null; return; }
+    let hit = null;
+    for (const o of all){
+      if (o.c.includes(v) || o.n.toLowerCase().includes(v)){ hit = o; break; }
+    }
+    if (!hit){ return; }
+    if (state.focus !== hit.ind) setFocus(hit.ind);
+    state.pulse = {c:hit.c};
+    state.dirty = true; requestDraw();
+    // scroll sidebar
+    const el = document.querySelector(`.ind[data-g="${CSS.escape(hit.ind)}"]`);
+    if (el) el.scrollIntoView({block:'center'});
+  }, 220);
+});
+q.addEventListener('keydown', e=>{ if(e.key==='Enter') q.dispatchEvent(new Event('input')); });
+
+/* ===================== controls ===================== */
+function bindSeg(id, key, after){
+  const box = document.getElementById(id);
+  box.querySelectorAll('button').forEach(b=>{
+    b.onclick = ()=>{
+      box.querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      after(b.dataset.v);
+    };
+  });
+}
+bindSeg('capSeg', 'capKey', v=>{
+  state.capKey = v==='mcap' ? 'v' : 'f';
+  state.dirty = true; renderSide(); renderCrumb(); requestDraw();
+});
+bindSeg('sortSeg', 'sortBy', v=>{
+  state.sortBy = v; state.dirty = true; requestDraw(); renderCrumb();
+});
+
+/* ===================== init ===================== */
+async function init(){
+  // 1) always start from the embedded snapshot so the page works offline (file://)
+  loadDataset(EMBED, EMBED_TS ? EMBED_TS.slice(0,10) : null, EMBED_TS);
+  resize();
+  renderStats(); renderSrc(); renderRamp(); renderSide(); renderCrumb();
+  paint();
+  state.dirty = true;
+  requestDraw();
+
+  // 2) when served over HTTP, try to load the date manifest for date switching
+  if (location.protocol === 'http:' || location.protocol === 'https:'){
+    try{
+      const res = await fetch('data/manifest.json', {cache:'no-cache'});
+      if (res.ok){
+        const mf = await res.json();
+        DATES = (mf.dates || []).slice().sort((a,b)=> a.date < b.date ? 1 : -1);
+        if (DATES.length){
+          const want = new URLSearchParams(location.search).get('d');
+          const pick = DATES.find(d=>d.date===want) ? want : (mf.latest || DATES[0].date);
+          await loadDate(pick);
+          renderDatePicker();
+        }
+      }
+    }catch(err){
+      console.warn('manifest unavailable, offline snapshot in use', err);
+    }
+  }
+}
+init();
+window.addEventListener('load', ()=>{ resize(); state.dirty=true; requestDraw(); });
+</script>
+</body>
+</html>
