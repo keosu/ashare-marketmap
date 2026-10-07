@@ -39,18 +39,19 @@ def fetch_index_tradedate():
 def fetch(page):
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
            "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
+    last = None
     for attempt in range(4):
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=25) as r:
+            with urllib.request.urlopen(req, timeout=20) as r:
                 j = json.loads(r.read().decode("utf-8", "ignore"))
             d = (j or {}).get("data") or {}
             return d.get("diff") or [], d.get("total", 0)
         except Exception as e:
-            if attempt == 3:
-                print("fail page", page, e, file=sys.stderr)
-                return [], 0
-            time.sleep(1.2 * (attempt + 1))
+            last = e
+            # rate-limited / connection reset -> back off progressively
+            time.sleep(1.5 * (1.8 ** attempt))
+    print("fail page", page, last, file=sys.stderr)
     return [], 0
 
 
@@ -72,14 +73,48 @@ def main():
         sys.exit(3)
 
     rows, total = [], 0
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for i, (diff, t) in enumerate(ex.map(fetch, range(1, PAGES + 1)), 1):
+    failed = []
+    # Modest concurrency: 8 threads reliably trips the endpoint's rate limiter,
+    # which silently returns zero rows and looks like an empty market.
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for page, (diff, t) in enumerate(ex.map(fetch, range(1, PAGES + 1)), 1):
             rows.extend(diff)
             if t:
                 total = t
-            if i % 15 == 0:
-                print("got %d" % len(rows), file=sys.stderr)
+            elif not diff:
+                failed.append(page)
+            if page % 15 == 0:
+                print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
     print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
+
+    # Second pass: retry only the pages that came back empty, sequentially so
+    # we stay under the rate limit. Bounded so a hard rate-limit can't stretch
+    # the run into a hang — the completeness gate below decides whether we
+    # accept the result.
+    if failed:
+        print("retrying %d failed pages: %s" % (len(failed), failed), file=sys.stderr)
+        recovered = 0
+        budget = min(len(failed), 12)
+        for page in failed[:budget]:
+            diff, t = fetch(page)
+            if diff:
+                rows.extend(diff); recovered += 1
+            if t:
+                total = t
+            time.sleep(0.5)
+        print("recovered %d/%d attempted -> %d rows"
+              % (recovered, budget, len(rows)), file=sys.stderr)
+
+    # Completeness gate: the endpoint reports ~5900 listings. A partial fetch
+    # (rate limiting, network blips) would silently produce a wrong treemap, so
+    # refuse to write anything unless we got essentially all of them.
+    if total and len(rows) < total * 0.97:
+        print("[fail] incomplete fetch: %d/%d rows, keeping previous snapshot"
+              % (len(rows), total), file=sys.stderr)
+        sys.exit(1)
+    if not rows:
+        print("[fail] empty dataset, keeping previous", file=sys.stderr)
+        sys.exit(1)
 
     seen = {}
     for r in rows:
@@ -102,6 +137,12 @@ def main():
 
     if not out:
         print("[fail] empty dataset, keeping previous", file=sys.stderr)
+        sys.exit(1)
+
+    # Sanity floor: a normal full-universe run yields >5000 names.
+    if len(out) < 5000:
+        print("[fail] only %d valid rows, keeping previous snapshot" % len(out),
+              file=sys.stderr)
         sys.exit(1)
 
     with open(OUT, "w", encoding="utf-8") as f:

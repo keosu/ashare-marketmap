@@ -13,3 +13,4 @@ shot*.png
 # agent memory + local test harness
 .workbuddy/
 smoke.js
+.logs/

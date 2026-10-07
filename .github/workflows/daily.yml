@@ -36,87 +36,27 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Fetch full A-share universe
-        id: fetch
+      - name: Fetch, stamp with the real trade date, build and commit
+        id: run
         env:
           FORCE: ${{ github.event.inputs.force || '0' }}
+          # CI builds without the inlined fallback: the page fetches data/*.json,
+          # which keeps each daily commit small.
+          EMBED: '0'
         run: |
-          set -e
-          rc=0
-          python fetch_ashare.py || rc=$?
-          if [ "$rc" = "3" ]; then
-            echo "::notice::非交易日，跳过抓取"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$rc" != "0" ]; then
-            echo "::error::抓取失败 (rc=$rc)"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit "$rc"
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Detect trade date and build
-        id: build
-        if: steps.fetch.outputs.skip != 'true'
-        run: |
-          set -e
-          # Ask the index for its own latest session date (authoritative), so a
-          # holiday or a stale upstream response can never be stamped as today.
-          TRADE_DATE=$(python - <<'PY'
-          import json, urllib.request, datetime
-          req = urllib.request.Request(
-              "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f124",
-              headers={"User-Agent": "Mozilla/5.0"})
-          d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
-          ep = (d.get("data") or {}).get("f124")
-          print(datetime.datetime.fromtimestamp(int(ep)).strftime("%Y-%m-%d") if ep else "")
-          PY
-          )
-          echo "trade date: $TRADE_DATE"
-          if [ -z "$TRADE_DATE" ]; then
-            TRADE_DATE=$(date -u +%F)
-            echo "probe failed, falling back to $TRADE_DATE"
-          fi
-          echo "TRADE_DATE=$TRADE_DATE" >> "$GITHUB_ENV"
-
-          # Idempotency: if this date is already committed, stop here.
-          if git ls-files --error-unmatch "data/$TRADE_DATE.json" >/dev/null 2>&1; then
-            echo "data/$TRADE_DATE.json already exists -> nothing to do"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          SNAPSHOT_DATE="$TRADE_DATE" EMBED=0 python build.py
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Commit snapshot
-        if: steps.build.outputs.changed == 'true'
-        env:
-          TRADE_DATE: ${{ env.TRADE_DATE }}
-        run: |
-          set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A index.html data/
-          if git diff --staged --quiet; then
-            echo "no diff"
-            exit 0
-          fi
-          git commit -m "snapshot: A-share market cap map for $TRADE_DATE"
-          git push
+          set -euo pipefail
+          ./daily.sh
+          echo "changed=$(git log -1 --pretty=%s | grep -q snapshot && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         if: always()
-        env:
-          TRADE_DATE: ${{ env.TRADE_DATE }}
         run: |
           {
-            echo "### A股快照 ${TRADE_DATE:-未生成}"
+            echo "### A股快照任务"
             echo ""
-            echo "- 抓取: ${{ steps.fetch.outcome }}"
-            echo "- 构建: ${{ steps.build.outcome }}"
-            echo "- 新提交: ${{ steps.build.outputs.changed || 'false' }}"
+            echo "- 步骤: ${{ steps.run.outcome }}"
+            echo "- 最新提交: \`$(git log -1 --pretty='%s (%cr)')\`"
+            echo "- 可用日期: $(ls data/*.json 2>/dev/null | wc -l) 天"
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
