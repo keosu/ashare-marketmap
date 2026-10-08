@@ -1,6 +1,11 @@
 name: Daily A-share snapshot
 
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.logs/**'
   schedule:
     # 交易日收盘后跑：北京时间 17:20 = UTC 09:20
     # 加一次凌晨补跑，覆盖节假日 / 上游延迟的情况
@@ -12,10 +17,6 @@ on:
         description: '强制抓取（忽略交易日判断）'
         required: false
         default: 'false'
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
 
 permissions:
   contents: write
@@ -27,10 +28,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Fetches the latest session, stamps it with the *real* trade date, builds the
+  # per-date snapshot and commits it. Runs only on schedule / manual dispatch — a
+  # plain code push must not trigger a redundant fetch. The resulting commit is a
+  # `push` event, which is what fires the deploy job below.
   update:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -38,15 +46,16 @@ jobs:
 
       - name: Fetch, stamp with the real trade date, build and commit
         id: run
+        continue-on-error: true
         env:
           FORCE: ${{ github.event.inputs.force || '0' }}
           # CI builds without the inlined fallback: the page fetches data/*.json,
           # which keeps each daily commit small.
           EMBED: '0'
+          PUSH: '1'
         run: |
-          set -euo pipefail
-          ./daily.sh
-          echo "changed=$(git log -1 --pretty=%s | grep -q snapshot && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+          bash daily.sh
 
       - name: Summary
         if: always()
@@ -54,23 +63,31 @@ jobs:
           {
             echo "### A股快照任务"
             echo ""
-            echo "- 步骤: ${{ steps.run.outcome }}"
+            echo "- 事件: ${{ github.event_name }}"
+            echo "- 抓取/构建: ${{ steps.run.outcome }}"
             echo "- 最新提交: \`$(git log -1 --pretty='%s (%cr)')\`"
-            echo "- 可用日期: $(ls data/*.json 2>/dev/null | wc -l) 天"
+            echo "- 已存快照: $(ls data/*.json 2>/dev/null | wc -l) 天"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Publishes whatever is currently on main. Fires on every push (code OR the
+  # data commit from the update job), so the site is always served from the
+  # latest committed state — and the very first deploy works off the committed
+  # historical snapshot even before any fetch has succeeded.
   deploy:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/configure-pages@v5
+
       - uses: actions/upload-pages-artifact@v3
         with:
           # ship only what the site actually needs
           path: |
             index.html
             data/
+
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v4
