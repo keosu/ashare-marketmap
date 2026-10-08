@@ -83,10 +83,10 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          # ship only what the site actually needs
-          path:
-            - index.html
-            - data/
+          # The action already excludes .git and .github; '.' ships index.html
+          # and data/ (everything the static site needs) and nothing else we care
+          # about. The action's `path` input takes a single string, not a list.
+          path: .
 
       - name: Deploy to GitHub Pages
         id: deploy
