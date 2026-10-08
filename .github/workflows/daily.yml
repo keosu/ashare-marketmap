@@ -84,9 +84,9 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           # ship only what the site actually needs
-          path: |
-            index.html
-            data/
+          path:
+            - index.html
+            - data/
 
       - name: Deploy to GitHub Pages
         id: deploy
