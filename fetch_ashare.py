@@ -11,7 +11,11 @@ UA = {
 }
 FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
 FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
-PAGES = 60
+# Pull 500 rows per request so the whole universe needs only ~12 requests.
+# The endpoint rate-limits by request frequency; a dozen slow requests can't
+# trip it, whereas 60 fast ones (100/page) reliably get throttled to ~1900 rows.
+PZ = 500
+PAGES = 15
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "data.json")
 
@@ -41,8 +45,8 @@ def fetch_index_tradedate():
 
 
 def fetch(page, tries=2, retry_gap=3.0):
-    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
-           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
+    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=%d&po=1&np=1"
+           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, PZ, FS, FIELDS))
     total = 0
     for attempt in range(tries):
         try:
@@ -93,7 +97,7 @@ def main():
             total = t
         elif not diff:
             failed.append(page)
-        if page % 15 == 0:
+        if page % 5 == 0:
             print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
         time.sleep(gap)
     print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
