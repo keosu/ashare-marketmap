@@ -35,23 +35,28 @@ def fetch_index_tradedate():
     return None
 
 
-def fetch(page):
+def fetch(page, tries=3):
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
            "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
     last = None
-    for attempt in range(4):
+    for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 j = json.loads(r.read().decode("utf-8", "ignore"))
             d = (j or {}).get("data") or {}
-            return d.get("diff") or [], d.get("total", 0)
+            diff = d.get("diff") or []
+            total = d.get("total", 0)
+            # The endpoint rate-limits by returning an empty `diff` rather than
+            # an error, so an empty page is treated as retryable.
+            if diff:
+                return diff, total
+            last = "empty diff (rate-limited?)"
         except Exception as e:
             last = e
-            # rate-limited / connection reset -> back off progressively
-            time.sleep(1.5 * (1.8 ** attempt))
-    print("fail page", page, last, file=sys.stderr)
-    return [], 0
+        # back off before the next attempt
+        time.sleep(1.2 * (attempt + 1))
+    return [], total
 
 
 def num(v):
@@ -95,14 +100,14 @@ def main():
     if failed:
         print("retrying %d failed pages: %s" % (len(failed), failed), file=sys.stderr)
         recovered = 0
-        budget = min(len(failed), 12)
+        budget = min(len(failed), 24)
         for page in failed[:budget]:
             diff, t = fetch(page)
             if diff:
                 rows.extend(diff); recovered += 1
             if t:
                 total = t
-            time.sleep(0.5)
+            time.sleep(1.0)
         print("recovered %d/%d attempted -> %d rows"
               % (recovered, budget, len(rows)), file=sys.stderr)
 
