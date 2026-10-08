@@ -60,7 +60,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
-    needs: update
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
