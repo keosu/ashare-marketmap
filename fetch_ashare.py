@@ -130,15 +130,6 @@ def main():
         if len(slow) > len(rows):
             rows = slow
         print("slow pass -> %d rows" % len(rows), file=sys.stderr)
-            diff, t = fetch(page, tries=1)
-            if diff:
-                slow.extend(diff)
-            if t:
-                total = t
-            time.sleep(1.0)
-        if len(slow) > len(rows):
-            rows = slow
-        print("slow pass -> %d rows" % len(rows), file=sys.stderr)
 
     # Completeness gate: the endpoint reports ~5900 listings. A partial fetch
     # (rate limiting, network blips) would silently produce a wrong treemap, so
