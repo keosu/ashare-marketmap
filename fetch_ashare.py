@@ -2,7 +2,6 @@
 and write data.json. Used both locally and by the daily GitHub Action."""
 import json, os, sys, time, datetime
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
@@ -74,17 +73,19 @@ def main():
 
     rows, total = [], 0
     failed = []
-    # Modest concurrency: 8 threads reliably trips the endpoint's rate limiter,
-    # which silently returns zero rows and looks like an empty market.
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for page, (diff, t) in enumerate(ex.map(fetch, range(1, PAGES + 1)), 1):
-            rows.extend(diff)
-            if t:
-                total = t
-            elif not diff:
-                failed.append(page)
-            if page % 15 == 0:
-                print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
+    # Sequential with a small gap between pages. Bursting (even 4 threads) trips
+    # the endpoint's rate limiter, which silently returns zero rows and looks
+    # like an empty market. One daily run at ~0.3s/page is plenty fast (≈40s).
+    for page in range(1, PAGES + 1):
+        diff, t = fetch(page)
+        rows.extend(diff)
+        if t:
+            total = t
+        elif not diff:
+            failed.append(page)
+        if page % 15 == 0:
+            print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
+        time.sleep(0.3)
     print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
 
     # Second pass: retry only the pages that came back empty, sequentially so
