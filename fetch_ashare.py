@@ -3,7 +3,13 @@ and write data.json. Used both locally and by the daily GitHub Action."""
 import json, os, sys, time, datetime
 import urllib.request
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+UA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0 Safari/537.36",
+    "Referer": "https://quote.eastmoney.com/",
+    "Host": "push2.eastmoney.com",
+}
 FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
 FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 PAGES = 60
@@ -80,7 +86,7 @@ def main():
     failed = []
     # Sequential with a small gap between pages. Bursting (even 4 threads) trips
     # the endpoint's rate limiter, which silently returns zero rows and looks
-    # like an empty market. One daily run at ~0.3s/page is plenty fast (≈40s).
+    # like an empty market. ~0.5s/page is plenty fast (≈30s) for one daily run.
     for page in range(1, PAGES + 1):
         diff, t = fetch(page)
         rows.extend(diff)
@@ -90,7 +96,7 @@ def main():
             failed.append(page)
         if page % 15 == 0:
             print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
-        time.sleep(0.3)
+        time.sleep(0.5)
     print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
 
     # Second pass: retry only the pages that came back empty, sequentially so
@@ -110,6 +116,23 @@ def main():
             time.sleep(1.0)
         print("recovered %d/%d attempted -> %d rows"
               % (recovered, budget, len(rows)), file=sys.stderr)
+
+    # Severe rate limiting: if a large share of pages came back empty, the
+    # targeted retry above won't be enough. Do one slow full pass over every
+    # page with a long gap so we recover without re-tripping the limiter.
+    if total and len(rows) < total * 0.97 and len(failed) > budget:
+        print("slow full recovery pass (rate-limited)...", file=sys.stderr)
+        slow = []
+        for page in range(1, PAGES + 1):
+            diff, t = fetch(page, tries=2)
+            if diff:
+                slow.extend(diff)
+            if t:
+                total = t
+            time.sleep(1.2)
+        if len(slow) > len(rows):
+            rows = slow
+        print("slow pass -> %d rows" % len(rows), file=sys.stderr)
 
     # Completeness gate: the endpoint reports ~5900 listings. A partial fetch
     # (rate limiting, network blips) would silently produce a wrong treemap, so
