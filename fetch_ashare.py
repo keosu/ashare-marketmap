@@ -45,6 +45,7 @@ def fetch(page, tries=3):
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
            "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
     last = None
+    total = 0
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
