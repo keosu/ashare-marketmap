@@ -8,7 +8,6 @@ UA = {
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/120.0 Safari/537.36",
     "Referer": "https://quote.eastmoney.com/",
-    "Host": "push2.eastmoney.com",
 }
 FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
 FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
@@ -41,28 +40,25 @@ def fetch_index_tradedate():
     return None
 
 
-def fetch(page, tries=3):
+def fetch(page, tries=2):
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
            "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
-    last = None
     total = 0
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=12) as r:
                 j = json.loads(r.read().decode("utf-8", "ignore"))
             d = (j or {}).get("data") or {}
             diff = d.get("diff") or []
             total = d.get("total", 0)
-            # The endpoint rate-limits by returning an empty `diff` rather than
-            # an error, so an empty page is treated as retryable.
+            # The endpoint sometimes returns an empty `diff` under load; retry
+            # once with a short gap before giving up on this page.
             if diff:
                 return diff, total
-            last = "empty diff (rate-limited?)"
-        except Exception as e:
-            last = e
-        # back off before the next attempt
-        time.sleep(1.2 * (attempt + 1))
+        except Exception:
+            pass
+        time.sleep(1.0)
     return [], total
 
 
@@ -125,12 +121,12 @@ def main():
         print("slow full recovery pass (rate-limited)...", file=sys.stderr)
         slow = []
         for page in range(1, PAGES + 1):
-            diff, t = fetch(page, tries=2)
+            diff, t = fetch(page, tries=1)
             if diff:
                 slow.extend(diff)
             if t:
                 total = t
-            time.sleep(1.2)
+            time.sleep(1.0)
         if len(slow) > len(rows):
             rows = slow
         print("slow pass -> %d rows" % len(rows), file=sys.stderr)
