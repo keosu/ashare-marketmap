@@ -24,22 +24,36 @@ log "=== daily refresh start ==="
 
 FORCE="${FORCE:-0}"
 
-# 1) authoritative trade date from the index quote (handles holidays / T+1 close)
+# 1) authoritative trade date from the index quote (handles holidays / T+1 close).
+#    Falls back to a Tencent quote timestamp when Eastmoney is throttled (CI).
 TRADE_DATE=$("$PY" - <<'PY' 2>>"$LOG"
 import json, urllib.request, datetime
-try:
-    req = urllib.request.Request(
-        "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f124",
-        headers={"User-Agent": "Mozilla/5.0"})
-    d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
-    ep = (d.get("data") or {}).get("f124")
-    if ep:
-        dt = datetime.datetime.fromtimestamp(int(ep)).date()
-        print(dt.strftime("%Y-%m-%d") if dt.weekday() < 5 else "")
-    else:
-        print("")
-except Exception:
-    print("")
+def em():
+    try:
+        req = urllib.request.Request(
+            "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f124",
+            headers={"User-Agent": "Mozilla/5.0"})
+        d = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        ep = (d.get("data") or {}).get("f124")
+        if ep:
+            dt = datetime.datetime.fromtimestamp(int(ep)).date()
+            return dt.strftime("%Y-%m-%d") if dt.weekday() < 5 else ""
+    except Exception:
+        pass
+    return ""
+def tenc():
+    try:
+        req = urllib.request.Request(
+            "https://qt.gtimg.cn/q=sh600519",
+            headers={"User-Agent":"Mozilla/5.0","Referer":"https://gu.qq.com/"})
+        s = urllib.request.urlopen(req, timeout=15).read().decode("gbk","ignore")
+        f = s.split('"')[1].split("~") if '"' in s else []
+        if len(f) > 30 and f[30][:8].isdigit():
+            return "%s-%s-%s" % (f[30][:4], f[30][4:6], f[30][6:8])
+    except Exception:
+        pass
+    return ""
+print(em() or tenc() or "")
 PY
 )
 if [ -z "$TRADE_DATE" ]; then

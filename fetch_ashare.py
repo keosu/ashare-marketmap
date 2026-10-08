@@ -1,96 +1,72 @@
-"""Fetch the A-share universe (market cap + daily change) from Eastmoney and
-write data.json.
+"""Fetch the A-share universe (market cap + daily change) and write data.json.
 
-Design notes (rate-limit strategy)
-----------------------------------
-Eastmoney throttles requests coming from GitHub Actions' *shared* IP very
-aggressively: a calm 12-request pass gets only the first page through, while a
-fast 19-request pass squeezed out ~1.9k rows. The pattern is clear -- the fewer
-requests we make, the better our odds of getting clean data before the shared
-budget is exhausted by everyone else on that IP.
+Two data sources, tried in order:
 
-So the primary path is a SINGLE large `pz` request that pulls the whole universe
-in one shot (1 request == maximum chance of slipping through). We retry that one
-request a few times within the run (small back-off). If the endpoint caps `pz`
-and returns a *partial* page (a real total but fewer rows than expected), we fall
-back to a handful of large pages and cache each successful page in the repo so
-that, on severe throttling, several scheduled runs gradually assemble the full
-snapshot (GitHub fires this workflow twice on weekdays plus manual dispatch).
+1. Eastmoney (primary) -- one large `pz=6000` request. Works great from a normal
+   broadband IP (the user's PC) and returns the freshest industry tags. GitHub
+   Actions' *shared* IP is throttled hard by Eastmoney, so this usually returns
+   nothing there.
 
-A successful run writes data.json AND a marker file
-``data/_pages/.complete_<TRADE_DATE>``.  daily.sh only builds / commits a
-snapshot when that marker exists, so an incomplete run (pure throttle, empty
-response) never produces a wrong treemap.
+2. Tencent (fallback, reliable from anywhere) -- `qt.gtimg.cn` is NOT throttled on
+   GitHub's IP. We batch-fetch live price / change% / total-market-cap for every
+   code listed in ``industry_map.json`` (a static code -> {name, industry,
+   market} table extracted from a past Eastmoney snapshot and committed to the
+   repo). Industry comes from that table, so the treemap keeps its sector
+   partitioning even though the live numbers come from Tencent.
+
+Only when we actually recovered a (near-)complete universe do we write data.json
+and the ``.complete_<date>`` marker. daily.sh only builds / commits a snapshot
+when that marker exists, so a throttled / failed run never produces a wrong
+treemap.
 """
 import json, os, sys, time, datetime
 import urllib.request
 
-UA = {
+UA_EAST = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/120.0 Safari/537.36",
     "Referer": "https://quote.eastmoney.com/",
 }
-FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
-FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+UA_TENC = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0 Safari/537.36",
+    "Referer": "https://gu.qq.com/",
+}
+EM_FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
+EM_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 
-# One big page keeps the request count minimal (GitHub's shared IP throttle is
-# request-budget based). Most of the time this returns the whole universe.
 PZ = int(os.environ.get("PZ", "6000"))
-# Independent retries of that single request within one run.
-RETRIES = int(os.environ.get("RETRIES", "4"))
-RETRY_GAP = float(os.environ.get("RETRY_GAP", "2.0"))
 # Sanity floor: a full universe run yields well over 5000 valid names.
 MIN_ROWS = int(os.environ.get("MIN_ROWS", "5000"))
-# Minimum fraction of `total` we must recover before we call it complete.
+# Minimum fraction of the expected universe we must recover to call it complete.
 COMPLETE_RATIO = float(os.environ.get("COMPLETE_RATIO", "0.95"))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "data.json")
 PAGES_ROOT = os.path.join(HERE, "data", "_pages")
+MAP_PATH = os.path.join(HERE, "industry_map.json")
 
 
-# ---- trade-day helpers -------------------------------------------------
+# ---- helpers -----------------------------------------------------------
 def is_weekday(d):
     return d.weekday() < 5
 
 
 def fetch_index_tradedate():
-    """Ask a major index for its own latest trading date (field f124 = epoch)."""
     url = ("https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001"
            "&fields=f43,f57,f58,f124")
     try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=20) as r:
+        req = urllib.request.Request(url, headers=UA_EAST)
+        with urllib.request.urlopen(req, timeout=15) as r:
             j = json.loads(r.read().decode("utf-8", "ignore"))
-        d = (j.get("data") or {})
-        epoch = d.get("f124")
-        if epoch:
-            return datetime.datetime.fromtimestamp(int(epoch)).strftime("%Y-%m-%d")
+        ep = (j.get("data") or {}).get("f124")
+        if ep:
+            return datetime.datetime.fromtimestamp(int(ep)).strftime("%Y-%m-%d")
     except Exception as e:
         print("index date probe failed:", e, file=sys.stderr)
     return None
-
-
-def fetch_page(pn, pz, tries=2, retry_gap=2.0):
-    """Return (diff, total). Empty diff means throttled / failed."""
-    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=%d&po=1&np=1"
-           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (pn, pz, FS, FIELDS))
-    total = 0
-    for attempt in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=15) as r:
-                j = json.loads(r.read().decode("utf-8", "ignore"))
-            d = (j or {}).get("data") or {}
-            diff = d.get("diff") or []
-            total = d.get("total", 0)
-            if diff:
-                return diff, total
-        except Exception:
-            pass
-        time.sleep(retry_gap)
-    return [], total
 
 
 def num(v):
@@ -102,35 +78,139 @@ def num(v):
         return None
 
 
-# ---- per-date page cache (cross-run accumulation) ----------------------
-def cache_dir_for(date_str):
-    return os.path.join(PAGES_ROOT, date_str)
+# ---- source 1: Eastmoney ----------------------------------------------
+def em_fetch():
+    """One big request. Returns list[dict] on success, else None."""
+    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=%d&po=1&np=1"
+           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (PZ, EM_FS, EM_FIELDS))
+    try:
+        req = urllib.request.Request(url, headers=UA_EAST)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            j = json.loads(r.read().decode("utf-8", "ignore"))
+        d = (j or {}).get("data") or {}
+        diff = d.get("diff") or []
+        total = d.get("total", 0)
+    except Exception as e:
+        print("eastmoney request failed:", e, file=sys.stderr)
+        return None
+    if not diff or (total and len(diff) < total * COMPLETE_RATIO) \
+            or len(diff) < MIN_ROWS:
+        print("eastmoney incomplete (got %d / %s) -- will try Tencent"
+              % (len(diff), total or "?"), file=sys.stderr)
+        return None
+    seen = {}
+    for r in diff:
+        c = r.get("f12")
+        if c:
+            seen[c] = r
+    out = []
+    for r in seen.values():
+        mcap = num(r.get("f20"))
+        if not mcap or mcap <= 0:
+            continue
+        out.append({
+            "c": r.get("f12"), "n": r.get("f14"),
+            "p": num(r.get("f2")), "d": num(r.get("f3")),
+            "v": mcap, "f": num(r.get("f21")) or 0,
+            "i": r.get("f100") or "其他", "m": r.get("f13"),
+        })
+    out.sort(key=lambda x: -x["v"])
+    print("eastmoney ok: %d stocks" % len(out), file=sys.stderr)
+    return out
 
 
-def load_cache(date_str):
-    pages, total = {}, 0
-    cd = cache_dir_for(date_str)
-    if not os.path.isdir(cd):
-        return pages, total
-    for fn in sorted(os.listdir(cd)):
-        if fn.startswith("page-") and fn.endswith(".json"):
-            try:
-                j = json.load(open(os.path.join(cd, fn), encoding="utf-8"))
-                pages[int(fn[5:-5])] = j.get("diff") or []
-                total = j.get("total") or total
-            except Exception:
-                pass
-    return pages, total
+# ---- source 2: Tencent (reliable from GitHub CI) -----------------------
+def tenc_prefix(code, m):
+    # 北交所 codes (8xxxxx / 43xxxx / 47xxxx / 92xxxx) live under the "bj" prefix
+    # on Tencent even though Eastmoney sometimes tags them with m=0.
+    if code[:1] == "8" or code.startswith(("43", "47", "92")):
+        return "bj" + code
+    if m == 1:
+        return "sh" + code
+    if m == 51:
+        return "bj" + code
+    if m == 0:
+        return "sz" + code
+    if code.startswith(("60", "68", "9", "5", "11", "113", "110")):
+        return "sh" + code
+    if code.startswith(("0", "3", "2", "12", "123", "124")):
+        return "sz" + code
+    return "sh" + code
 
 
-def save_page(date_str, pn, diff, total):
-    cd = cache_dir_for(date_str)
-    os.makedirs(cd, exist_ok=True)
-    with open(os.path.join(cd, "page-%d.json" % pn), "w", encoding="utf-8") as f:
-        json.dump({"total": total, "diff": diff},
-                  f, ensure_ascii=False, separators=(",", ":"))
+def tenc_fetch(market_map):
+    if not market_map:
+        return None
+    UA = UA_TENC
+    items = []  # (tencent_code, plain_code, meta)
+    for code, meta in market_map.items():
+        items.append((tenc_prefix(code, meta.get("m")), code, meta))
+    prices = {}
+    B = 100
+    for i in range(0, len(items), B):
+        q = ",".join(it[0] for it in items[i:i + B])
+        try:
+            req = urllib.request.Request("https://qt.gtimg.cn/q=" + q, headers=UA)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                txt = r.read().decode("gbk", "ignore")
+        except Exception as e:
+            print("tencent batch %d failed: %s" % (i, e), file=sys.stderr)
+            continue
+        for line in txt.split(";"):
+            line = line.strip()
+            if not line.startswith("v_"):
+                continue
+            eq = line.find("=")
+            key = line[2:eq]
+            s = line[eq + 2:-1] if line.endswith('"') else line[eq + 1:]
+            f = s.split("~")
+            if len(f) <= 45:
+                continue
+            price = num(f[3])
+            if price is None or price == 0:
+                continue
+            prices[key] = f
+        time.sleep(0.12)
+    out = []
+    for qt_code, code, meta in items:
+        f = prices.get(qt_code)
+        if not f:
+            continue
+        price = num(f[3])
+        if price is None:
+            continue
+        total_yi = num(f[45])   # 总市值, 亿元
+        float_yi = num(f[44])   # 流通市值, 亿元
+        out.append({
+            "c": code,
+            "n": f[1] or meta.get("n") or code,
+            "p": price,
+            "d": num(f[32]),
+            "v": (total_yi * 1e8) if total_yi else 0,
+            "f": (float_yi * 1e8) if float_yi else 0,
+            "i": meta.get("i") or "其他",
+            "m": meta.get("m"),
+        })
+    out = [x for x in out if x["v"] > 0]
+    out.sort(key=lambda x: -x["v"])
+    got = len(out)
+    exp = len(market_map)
+    print("tencent got %d / %d" % (got, exp), file=sys.stderr)
+    if exp and got < exp * COMPLETE_RATIO:
+        return None
+    if got < MIN_ROWS:
+        return None
+    return out
 
 
+def load_market_map():
+    try:
+        return json.load(open(MAP_PATH, encoding="utf-8"))
+    except Exception:
+        return None
+
+
+# ---- completion marker --------------------------------------------------
 def marker_path(date_str):
     return os.path.join(PAGES_ROOT, ".complete_%s" % date_str)
 
@@ -142,6 +222,10 @@ def clear_marker(date_str):
         pass
 
 
+def ensure_marker_dir():
+    os.makedirs(PAGES_ROOT, exist_ok=True)
+
+
 def main():
     force = os.environ.get("FORCE", "") == "1"
     today = datetime.date.today()
@@ -149,108 +233,33 @@ def main():
         print("[skip] %s is not a weekday" % today, file=sys.stderr)
         sys.exit(3)
 
-    # Trade date: explicit override (daily.sh computes it from the index quote)
-    # else probe the index ourselves, else fall back to today.
     trade_date = (os.environ.get("SNAPSHOT_DATE")
                   or fetch_index_tradedate()
                   or today.strftime("%Y-%m-%d"))
 
-    pages, total = load_cache(trade_date)
-    done = False
+    out = em_fetch()
+    src = "eastmoney"
+    if not out:
+        market_map = load_market_map()
+        if market_map:
+            out = tenc_fetch(market_map)
+            src = "tencent"
+        else:
+            print("[fail] no industry_map.json and eastmoney failed", file=sys.stderr)
 
-    # --- Phase 1: one big request, retried a few times ----------------
-    for i in range(RETRIES):
-        diff, t = fetch_page(1, PZ, tries=2, retry_gap=RETRY_GAP)
-        if t:
-            total = t
-        if diff:
-            # A clean single request gives the full universe.
-            if (not total or len(diff) >= total * COMPLETE_RATIO) \
-                    and len(diff) >= MIN_ROWS:
-                pages[1] = diff
-                save_page(trade_date, 1, diff, total)
-                done = True
-                break
-            # Partial page with a known total => the endpoint capped `pz`.
-            # Keep it and switch to the paging fallback below.
-            if total and len(diff) < total * COMPLETE_RATIO:
-                pages[1] = diff
-                save_page(trade_date, 1, diff, total)
-        # small back-off so the next attempt lands in a fresher window
-        time.sleep(RETRY_GAP * (i + 1))
-
-    # --- Phase 2: paging fallback (only if page 1 returned data) ------
-    # Triggered when the endpoint caps `pz` (partial page, real total). This is
-    # NOT the throttle case (throttle => empty diff, total 0 => skipped here).
-    if not done and total:
-        expected = (total + PZ - 1) // PZ
-        for pn in range(2, expected + 1):
-            if pn in pages:
-                continue
-            diff, t = fetch_page(pn, PZ, tries=2, retry_gap=RETRY_GAP)
-            if t:
-                total = t
-            if diff:
-                pages[pn] = diff
-                save_page(trade_date, pn, diff, total)
-            got = sum(len(v) for v in pages.values())
-            if total and got >= total * COMPLETE_RATIO:
-                done = True
-                break
-            time.sleep(RETRY_GAP)
-
-    got = sum(len(v) for v in pages.values())
-    print("trade_date=%s total=%s got=%d done=%s"
-          % (trade_date, total, got, done), file=sys.stderr)
-
-    if done and (not total or got >= total * COMPLETE_RATIO):
-        # Combine every cached page in order, dedupe, filter, sort.
-        seen = {}
-        for pn in sorted(pages):
-            for r in pages[pn]:
-                c = r.get("f12")
-                if c:
-                    seen[c] = r
-        out = []
-        for r in seen.values():
-            mcap = num(r.get("f20"))
-            if not mcap or mcap <= 0:
-                continue
-            out.append({
-                "c": r.get("f12"), "n": r.get("f14"),
-                "p": num(r.get("f2")), "d": num(r.get("f3")),
-                "v": mcap, "f": num(r.get("f21")) or 0,
-                "i": r.get("f100") or "其他", "m": r.get("f13"),
-            })
-        out.sort(key=lambda x: -x["v"])
-        if len(out) < MIN_ROWS:
-            print("[fail] only %d valid rows (<%d), keeping previous"
-                  % (len(out), MIN_ROWS), file=sys.stderr)
-            clear_marker(trade_date)
-            try:
-                os.remove(OUT)
-            except OSError:
-                pass
-            sys.exit(1)
-        with open(OUT, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
-        # Mark complete; the per-date cache is now redundant -> drop it.
-        with open(marker_path(trade_date), "w", encoding="utf-8") as f:
-            f.write(trade_date)
-        cd = cache_dir_for(trade_date)
-        if os.path.isdir(cd):
-            import shutil
-            shutil.rmtree(cd)
-        print("[ok] %d stocks, total mcap %.1f yi"
-              % (len(out), sum(x["v"] for x in out) / 1e8), file=sys.stderr)
+    if not out:
+        clear_marker(trade_date)
+        print("[partial] no complete source this run; next run will retry",
+              file=sys.stderr)
         sys.exit(0)
 
-    # Incomplete this run: leave any cached pages in place so the next scheduled
-    # run can continue. Do NOT write data.json, so daily.sh won't build a
-    # partial snapshot. Clear the marker defensively.
-    clear_marker(trade_date)
-    print("[partial] %d/%s rows cached; next run will continue"
-          % (got, total or "?"), file=sys.stderr)
+    with open(OUT, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    ensure_marker_dir()
+    with open(marker_path(trade_date), "w", encoding="utf-8") as f:
+        f.write(trade_date)
+    print("[ok] src=%s %d stocks, total mcap %.1f yi"
+          % (src, len(out), sum(x["v"] for x in out) / 1e8), file=sys.stderr)
     sys.exit(0)
 
 
