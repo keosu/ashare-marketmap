@@ -1,5 +1,27 @@
-"""Fetch the full A-share universe (market cap + daily change) from Eastmoney
-and write data.json. Used both locally and by the daily GitHub Action."""
+"""Fetch the A-share universe (market cap + daily change) from Eastmoney and
+write data.json.
+
+Design notes (rate-limit strategy)
+----------------------------------
+Eastmoney throttles requests coming from GitHub Actions' *shared* IP very
+aggressively: a calm 12-request pass gets only the first page through, while a
+fast 19-request pass squeezed out ~1.9k rows. The pattern is clear -- the fewer
+requests we make, the better our odds of getting clean data before the shared
+budget is exhausted by everyone else on that IP.
+
+So the primary path is a SINGLE large `pz` request that pulls the whole universe
+in one shot (1 request == maximum chance of slipping through). We retry that one
+request a few times within the run (small back-off). If the endpoint caps `pz`
+and returns a *partial* page (a real total but fewer rows than expected), we fall
+back to a handful of large pages and cache each successful page in the repo so
+that, on severe throttling, several scheduled runs gradually assemble the full
+snapshot (GitHub fires this workflow twice on weekdays plus manual dispatch).
+
+A successful run writes data.json AND a marker file
+``data/_pages/.complete_<TRADE_DATE>``.  daily.sh only builds / commits a
+snapshot when that marker exists, so an incomplete run (pure throttle, empty
+response) never produces a wrong treemap.
+"""
 import json, os, sys, time, datetime
 import urllib.request
 
@@ -11,18 +33,24 @@ UA = {
 }
 FIELDS = "f12,f14,f2,f3,f20,f21,f100,f13"
 FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
-# Pull 500 rows per request so the whole universe needs only ~12 requests.
-# The endpoint rate-limits by request frequency; a dozen slow requests can't
-# trip it, whereas 60 fast ones (100/page) reliably get throttled to ~1900 rows.
-PZ = 500
-PAGES = 15
+
+# One big page keeps the request count minimal (GitHub's shared IP throttle is
+# request-budget based). Most of the time this returns the whole universe.
+PZ = int(os.environ.get("PZ", "6000"))
+# Independent retries of that single request within one run.
+RETRIES = int(os.environ.get("RETRIES", "4"))
+RETRY_GAP = float(os.environ.get("RETRY_GAP", "2.0"))
+# Sanity floor: a full universe run yields well over 5000 valid names.
+MIN_ROWS = int(os.environ.get("MIN_ROWS", "5000"))
+# Minimum fraction of `total` we must recover before we call it complete.
+COMPLETE_RATIO = float(os.environ.get("COMPLETE_RATIO", "0.95"))
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "data.json")
+PAGES_ROOT = os.path.join(HERE, "data", "_pages")
+
 
 # ---- trade-day helpers -------------------------------------------------
-# Only Mon-Fri; the real exchange holiday list is not available offline, so the
-# workflow also compares the payload date against the last trading day reported
-# by the index quote and skips the commit when nothing new arrived.
 def is_weekday(d):
     return d.weekday() < 5
 
@@ -44,20 +72,19 @@ def fetch_index_tradedate():
     return None
 
 
-def fetch(page, tries=2, retry_gap=3.0):
+def fetch_page(pn, pz, tries=2, retry_gap=2.0):
+    """Return (diff, total). Empty diff means throttled / failed."""
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=%d&po=1&np=1"
-           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, PZ, FS, FIELDS))
+           "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (pn, pz, FS, FIELDS))
     total = 0
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=12) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 j = json.loads(r.read().decode("utf-8", "ignore"))
             d = (j or {}).get("data") or {}
             diff = d.get("diff") or []
             total = d.get("total", 0)
-            # The endpoint sometimes returns an empty `diff` under load; retry
-            # once with a gap before giving up on this page.
             if diff:
                 return diff, total
         except Exception:
@@ -75,112 +102,156 @@ def num(v):
         return None
 
 
+# ---- per-date page cache (cross-run accumulation) ----------------------
+def cache_dir_for(date_str):
+    return os.path.join(PAGES_ROOT, date_str)
+
+
+def load_cache(date_str):
+    pages, total = {}, 0
+    cd = cache_dir_for(date_str)
+    if not os.path.isdir(cd):
+        return pages, total
+    for fn in sorted(os.listdir(cd)):
+        if fn.startswith("page-") and fn.endswith(".json"):
+            try:
+                j = json.load(open(os.path.join(cd, fn), encoding="utf-8"))
+                pages[int(fn[5:-5])] = j.get("diff") or []
+                total = j.get("total") or total
+            except Exception:
+                pass
+    return pages, total
+
+
+def save_page(date_str, pn, diff, total):
+    cd = cache_dir_for(date_str)
+    os.makedirs(cd, exist_ok=True)
+    with open(os.path.join(cd, "page-%d.json" % pn), "w", encoding="utf-8") as f:
+        json.dump({"total": total, "diff": diff},
+                  f, ensure_ascii=False, separators=(",", ":"))
+
+
+def marker_path(date_str):
+    return os.path.join(PAGES_ROOT, ".complete_%s" % date_str)
+
+
+def clear_marker(date_str):
+    try:
+        os.remove(marker_path(date_str))
+    except OSError:
+        pass
+
+
 def main():
     force = os.environ.get("FORCE", "") == "1"
-    # Gap between successive page requests. The Eastmoney endpoint rate-limits
-    # by frequency: anything under ~5s/page trips it and returns empty rows.
-    # A wide gap keeps every request clean so the whole universe comes back in
-    # one calm pass (~6s * 60 pages ≈ 6min) instead of fighting the limiter.
-    gap = float(os.environ.get("GAP", "6.0"))
     today = datetime.date.today()
-
     if not force and not is_weekday(today):
         print("[skip] %s is not a weekday" % today, file=sys.stderr)
         sys.exit(3)
 
-    rows, total = [], 0
-    failed = []
-    for page in range(1, PAGES + 1):
-        diff, t = fetch(page)
-        rows.extend(diff)
+    # Trade date: explicit override (daily.sh computes it from the index quote)
+    # else probe the index ourselves, else fall back to today.
+    trade_date = (os.environ.get("SNAPSHOT_DATE")
+                  or fetch_index_tradedate()
+                  or today.strftime("%Y-%m-%d"))
+
+    pages, total = load_cache(trade_date)
+    done = False
+
+    # --- Phase 1: one big request, retried a few times ----------------
+    for i in range(RETRIES):
+        diff, t = fetch_page(1, PZ, tries=2, retry_gap=RETRY_GAP)
         if t:
             total = t
-        elif not diff:
-            failed.append(page)
-        if page % 5 == 0:
-            print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
-        time.sleep(gap)
-    print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
+        if diff:
+            # A clean single request gives the full universe.
+            if (not total or len(diff) >= total * COMPLETE_RATIO) \
+                    and len(diff) >= MIN_ROWS:
+                pages[1] = diff
+                save_page(trade_date, 1, diff, total)
+                done = True
+                break
+            # Partial page with a known total => the endpoint capped `pz`.
+            # Keep it and switch to the paging fallback below.
+            if total and len(diff) < total * COMPLETE_RATIO:
+                pages[1] = diff
+                save_page(trade_date, 1, diff, total)
+        # small back-off so the next attempt lands in a fresher window
+        time.sleep(RETRY_GAP * (i + 1))
 
-    # Second pass: retry only the pages that came back empty, sequentially with
-    # the same calm gap so we don't re-trip the limiter.
-    if failed:
-        print("retrying %d failed pages: %s" % (len(failed), failed), file=sys.stderr)
-        recovered = 0
-        budget = min(len(failed), 24)
-        for page in failed[:budget]:
-            diff, t = fetch(page)
-            if diff:
-                rows.extend(diff); recovered += 1
+    # --- Phase 2: paging fallback (only if page 1 returned data) ------
+    # Triggered when the endpoint caps `pz` (partial page, real total). This is
+    # NOT the throttle case (throttle => empty diff, total 0 => skipped here).
+    if not done and total:
+        expected = (total + PZ - 1) // PZ
+        for pn in range(2, expected + 1):
+            if pn in pages:
+                continue
+            diff, t = fetch_page(pn, PZ, tries=2, retry_gap=RETRY_GAP)
             if t:
                 total = t
-            time.sleep(gap)
-        print("recovered %d/%d attempted -> %d rows"
-              % (recovered, budget, len(rows)), file=sys.stderr)
-
-    # Severe rate limiting: if a large share of pages came back empty, the
-    # targeted retry above won't be enough. Do one slow full pass over every
-    # page with the same gap so we recover without re-tripping the limiter.
-    if total and len(rows) < total * 0.97 and len(failed) > budget:
-        print("slow full recovery pass (rate-limited)...", file=sys.stderr)
-        slow = []
-        for page in range(1, PAGES + 1):
-            diff, t = fetch(page, tries=1)
             if diff:
-                slow.extend(diff)
-            if t:
-                total = t
-            time.sleep(gap)
-        if len(slow) > len(rows):
-            rows = slow
-        print("slow pass -> %d rows" % len(rows), file=sys.stderr)
+                pages[pn] = diff
+                save_page(trade_date, pn, diff, total)
+            got = sum(len(v) for v in pages.values())
+            if total and got >= total * COMPLETE_RATIO:
+                done = True
+                break
+            time.sleep(RETRY_GAP)
 
-    # Completeness gate: the endpoint reports ~5900 listings. A partial fetch
-    # (rate limiting, network blips) would silently produce a wrong treemap, so
-    # refuse to write anything unless we got essentially all of them.
-    if total and len(rows) < total * 0.97:
-        print("[fail] incomplete fetch: %d/%d rows, keeping previous snapshot"
-              % (len(rows), total), file=sys.stderr)
-        sys.exit(1)
-    if not rows:
-        print("[fail] empty dataset, keeping previous", file=sys.stderr)
-        sys.exit(1)
+    got = sum(len(v) for v in pages.values())
+    print("trade_date=%s total=%s got=%d done=%s"
+          % (trade_date, total, got, done), file=sys.stderr)
 
-    seen = {}
-    for r in rows:
-        c = r.get("f12")
-        if c:
-            seen[c] = r
+    if done and (not total or got >= total * COMPLETE_RATIO):
+        # Combine every cached page in order, dedupe, filter, sort.
+        seen = {}
+        for pn in sorted(pages):
+            for r in pages[pn]:
+                c = r.get("f12")
+                if c:
+                    seen[c] = r
+        out = []
+        for r in seen.values():
+            mcap = num(r.get("f20"))
+            if not mcap or mcap <= 0:
+                continue
+            out.append({
+                "c": r.get("f12"), "n": r.get("f14"),
+                "p": num(r.get("f2")), "d": num(r.get("f3")),
+                "v": mcap, "f": num(r.get("f21")) or 0,
+                "i": r.get("f100") or "其他", "m": r.get("f13"),
+            })
+        out.sort(key=lambda x: -x["v"])
+        if len(out) < MIN_ROWS:
+            print("[fail] only %d valid rows (<%d), keeping previous"
+                  % (len(out), MIN_ROWS), file=sys.stderr)
+            clear_marker(trade_date)
+            try:
+                os.remove(OUT)
+            except OSError:
+                pass
+            sys.exit(1)
+        with open(OUT, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+        # Mark complete; the per-date cache is now redundant -> drop it.
+        with open(marker_path(trade_date), "w", encoding="utf-8") as f:
+            f.write(trade_date)
+        cd = cache_dir_for(trade_date)
+        if os.path.isdir(cd):
+            import shutil
+            shutil.rmtree(cd)
+        print("[ok] %d stocks, total mcap %.1f yi"
+              % (len(out), sum(x["v"] for x in out) / 1e8), file=sys.stderr)
+        sys.exit(0)
 
-    out = []
-    for r in seen.values():
-        mcap = num(r.get("f20"))
-        if not mcap or mcap <= 0:
-            continue
-        out.append({
-            "c": r.get("f12"), "n": r.get("f14"),
-            "p": num(r.get("f2")), "d": num(r.get("f3")),
-            "v": mcap, "f": num(r.get("f21")) or 0,
-            "i": r.get("f100") or "其他", "m": r.get("f13"),
-        })
-    out.sort(key=lambda x: -x["v"])
-
-    if not out:
-        print("[fail] empty dataset, keeping previous", file=sys.stderr)
-        sys.exit(1)
-
-    # Sanity floor: a normal full-universe run yields >5000 names.
-    if len(out) < 5000:
-        print("[fail] only %d valid rows, keeping previous snapshot" % len(out),
-              file=sys.stderr)
-        sys.exit(1)
-
-    with open(OUT, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
-
-    print("[ok] %d stocks, total mcap %.1f yi" %
-          (len(out), sum(x["v"] for x in out) / 1e8), file=sys.stderr)
-    print("index tradedate:", fetch_index_tradedate(), file=sys.stderr)
+    # Incomplete this run: leave any cached pages in place so the next scheduled
+    # run can continue. Do NOT write data.json, so daily.sh won't build a
+    # partial snapshot. Clear the marker defensively.
+    clear_marker(trade_date)
+    print("[partial] %d/%s rows cached; next run will continue"
+          % (got, total or "?"), file=sys.stderr)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
