@@ -40,7 +40,7 @@ def fetch_index_tradedate():
     return None
 
 
-def fetch(page, tries=2):
+def fetch(page, tries=2, retry_gap=3.0):
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1"
            "&fltt=2&invt=2&fid=f20&fs=%s&fields=%s" % (page, FS, FIELDS))
     total = 0
@@ -53,12 +53,12 @@ def fetch(page, tries=2):
             diff = d.get("diff") or []
             total = d.get("total", 0)
             # The endpoint sometimes returns an empty `diff` under load; retry
-            # once with a short gap before giving up on this page.
+            # once with a gap before giving up on this page.
             if diff:
                 return diff, total
         except Exception:
             pass
-        time.sleep(1.0)
+        time.sleep(retry_gap)
     return [], total
 
 
@@ -73,6 +73,11 @@ def num(v):
 
 def main():
     force = os.environ.get("FORCE", "") == "1"
+    # Gap between successive page requests. The Eastmoney endpoint rate-limits
+    # by frequency: anything under ~5s/page trips it and returns empty rows.
+    # A wide gap keeps every request clean so the whole universe comes back in
+    # one calm pass (~6s * 60 pages ≈ 6min) instead of fighting the limiter.
+    gap = float(os.environ.get("GAP", "6.0"))
     today = datetime.date.today()
 
     if not force and not is_weekday(today):
@@ -81,9 +86,6 @@ def main():
 
     rows, total = [], 0
     failed = []
-    # Sequential with a small gap between pages. Bursting (even 4 threads) trips
-    # the endpoint's rate limiter, which silently returns zero rows and looks
-    # like an empty market. ~0.5s/page is plenty fast (≈30s) for one daily run.
     for page in range(1, PAGES + 1):
         diff, t = fetch(page)
         rows.extend(diff)
@@ -93,13 +95,11 @@ def main():
             failed.append(page)
         if page % 15 == 0:
             print("got %d (failed pages: %d)" % (len(rows), len(failed)), file=sys.stderr)
-        time.sleep(0.5)
+        time.sleep(gap)
     print("total reported:", total, "fetched:", len(rows), file=sys.stderr)
 
-    # Second pass: retry only the pages that came back empty, sequentially so
-    # we stay under the rate limit. Bounded so a hard rate-limit can't stretch
-    # the run into a hang — the completeness gate below decides whether we
-    # accept the result.
+    # Second pass: retry only the pages that came back empty, sequentially with
+    # the same calm gap so we don't re-trip the limiter.
     if failed:
         print("retrying %d failed pages: %s" % (len(failed), failed), file=sys.stderr)
         recovered = 0
@@ -110,17 +110,26 @@ def main():
                 rows.extend(diff); recovered += 1
             if t:
                 total = t
-            time.sleep(1.0)
+            time.sleep(gap)
         print("recovered %d/%d attempted -> %d rows"
               % (recovered, budget, len(rows)), file=sys.stderr)
 
     # Severe rate limiting: if a large share of pages came back empty, the
     # targeted retry above won't be enough. Do one slow full pass over every
-    # page with a long gap so we recover without re-tripping the limiter.
+    # page with the same gap so we recover without re-tripping the limiter.
     if total and len(rows) < total * 0.97 and len(failed) > budget:
         print("slow full recovery pass (rate-limited)...", file=sys.stderr)
         slow = []
         for page in range(1, PAGES + 1):
+            diff, t = fetch(page, tries=1)
+            if diff:
+                slow.extend(diff)
+            if t:
+                total = t
+            time.sleep(gap)
+        if len(slow) > len(rows):
+            rows = slow
+        print("slow pass -> %d rows" % len(rows), file=sys.stderr)
             diff, t = fetch(page, tries=1)
             if diff:
                 slow.extend(diff)
